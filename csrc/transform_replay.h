@@ -229,7 +229,10 @@ class NVF_API TransformReplay {
 
   // Self replay the transformation on `self` from logical to loop and
   // allocation onto `new_self`.
-  static void selfReplay(const TensorDomain* self, TensorDomain* new_self);
+  static void selfReplay(
+      const TensorDomain* self,
+      TensorDomain* new_self,
+      bool include_reductions = false);
 
   // Returns the loop position in producer that matches with `consumer_pos` in
   // consumer. Returns -1 if matching is impossible. This function can be used

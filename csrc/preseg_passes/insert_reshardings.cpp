@@ -16,6 +16,10 @@
 #include <ir/utils.h>
 #include <multidevice/utils.h>
 #include <ops/alias.h>
+#include <ops/arith.h>
+#include <ops/composite.h>
+#include <ops/utils.h>
+#include <transform_replay.h>
 
 namespace nvfuser::preseg_passes {
 namespace {
@@ -131,6 +135,40 @@ void insertReshardingSetsAfter(Fusion* fusion) {
   }
 }
 
+void decomposeRowParallelLinearWithBias(Fusion* fusion) {
+  for (Expr* e : fusion->exprs()) {
+    auto* linear_op = dynamic_cast<LinearOp*>(e);
+    if (linear_op == nullptr) {
+      continue;
+    }
+
+    if (!linear_op->hasBias()) {
+      continue;
+    }
+
+    TensorView* out = linear_op->out();
+    if (std::none_of(
+            out->getLoopDomain().begin(),
+            out->getLoopDomain().end(),
+            [](IterDomain* id) {
+              return id->isReduction() && id->isParallelized();
+            })) {
+      continue;
+    }
+
+    auto* without_bias = linear(linear_op->inA(), linear_op->inB());
+    TransformReplay::selfReplay(
+        out->domain(), without_bias->domain(), /*include_reductions=*/true);
+
+    TensorView* broadcasted_bias =
+        broadcast(linear_op->bias(), {true, true, false});
+    TensorView* new_out = add(without_bias, broadcasted_bias);
+    TransformReplay::selfReplay(
+        out->domain(), new_out->domain(), /*include_reductions=*/false);
+    ir_utils::replaceValInAllExprInputsAndFusionOutputs(out, new_out);
+  }
+}
+
 // If a TensorView has a reduction dimension that's DID-split, we R-factor the
 // TensorView into a local reduction followed by an allreduce.
 //
@@ -228,6 +266,8 @@ void rFactorLoopSplits(Fusion* fusion) {
 } // namespace
 
 void InsertReshardingsPass::runPass(Fusion* fusion) {
+  decomposeRowParallelLinearWithBias(fusion);
+
   rFactorLoopSplits(fusion);
 
   // shouldReshardAfter selects whether insertReshardingSetsAfter or

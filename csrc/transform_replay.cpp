@@ -155,9 +155,9 @@ class ReplaySelf : public ReplayTransformations {
 
  public:
   ReplaySelf(
-      const std::vector<IterDomain*>& _target_domain,
-      IterDomainMap _id_map)
-      : ReplayTransformations(_target_domain, std::move(_id_map)) {
+      const std::vector<IterDomain*>& target_domain,
+      IterDomainMap id_map)
+      : ReplayTransformations(target_domain, std::move(id_map)) {
     setErrorOnFailure(false);
   }
 };
@@ -240,24 +240,24 @@ TensorDomain* TransformReplay::fullSelfReplay(
 
 void TransformReplay::selfReplay(
     const TensorDomain* self,
-    TensorDomain* new_self) {
+    TensorDomain* new_self,
+    bool include_reductions /* = false*/) {
   FUSER_PERF_SCOPE("TransformReplay::selfReplay");
 
-  // NOTE: We could also have reduction IDs involved in transformation that
-  // leads to allocation domain, so technically we should have included
-  // reduction IDs in the replay as well. The reason that we skipped them here
-  // is because this function is used by `RemoveBcastSqueeze`, where we could
-  // have mismatch reduction IDs on the logical between `self` and
-  // `new_self`.
-  auto new_self_logical = TensorDomain::noReductions(new_self->logical());
-  auto self_logical = TensorDomain::noReductions(self->logical());
+  std::vector<IterDomain*> new_self_logical = new_self->logical();
+  std::vector<IterDomain*> self_logical = self->logical();
+  if (!include_reductions) {
+    // NOTE: We could also have reduction IDs involved in transformation that
+    // leads to allocation domain, so technically we should have included
+    // reduction IDs in the replay as well. The reason that we skipped them here
+    // is because this function is used by `RemoveBcastSqueeze`, where we could
+    // have mismatch reduction IDs on the logical between `self` and
+    // `new_self`.
+    new_self_logical = TensorDomain::noReductions(new_self_logical);
+    self_logical = TensorDomain::noReductions(self_logical);
+  }
 
-  NVF_ERROR(
-      new_self_logical.size() == self_logical.size(),
-      "Invalid number of IterDomains provided: ",
-      new_self_logical.size(),
-      " vs ",
-      self_logical.size());
+  NVF_ERROR_EQ(new_self_logical.size(), self_logical.size());
 
   // Map for replay
   IterDomainMap axis_map;
@@ -299,11 +299,13 @@ void TransformReplay::selfReplay(
     new_contiguity.reserve(self_allocation.size());
 
     // Push back the reduction IDs that are not mapped
-    for (auto id : new_self->logical()) {
-      if (id->isReduction()) {
-        new_alloc_domain.push_back(id);
-        // NOLINTNEXTLINE(modernize-use-emplace)
-        new_contiguity.push_back(std::nullopt);
+    if (!include_reductions) {
+      for (auto id : new_self->logical()) {
+        if (id->isReduction()) {
+          new_alloc_domain.push_back(id);
+          // NOLINTNEXTLINE(modernize-use-emplace)
+          new_contiguity.push_back(std::nullopt);
+        }
       }
     }
 
@@ -335,16 +337,20 @@ void TransformReplay::selfReplay(
     new_self->setAllocationDomain(new_alloc_domain, new_contiguity);
   }
 
-  if (self->loop() != self->logical()) {
+  std::vector<IterDomain*> self_loop = self->loop();
+  if (self_loop != self->logical()) {
     std::vector<IterDomain*> new_loop;
-    ReplaySelf replay(self->loop(), axis_map);
-    for (auto id : new_self->logical()) {
-      if (id->isReduction()) {
-        new_loop.push_back(id);
+    if (!include_reductions) {
+      self_loop = TensorDomain::noReductions(self_loop);
+      for (auto id : new_self->logical()) {
+        if (id->isReduction()) {
+          new_loop.push_back(id);
+        }
       }
     }
 
-    for (IterDomain* id : self->loop()) {
+    ReplaySelf replay(self_loop, axis_map);
+    for (IterDomain* id : self_loop) {
       auto it = replay.getReplay().find(id);
       NVF_ERROR(
           it != replay.getReplay().end(), "failed to replay IterDomain: ", id);
