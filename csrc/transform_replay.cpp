@@ -241,18 +241,12 @@ TensorDomain* TransformReplay::fullSelfReplay(
 void TransformReplay::selfReplay(
     const TensorDomain* self,
     TensorDomain* new_self,
-    bool ignore_reductions /* = false*/) {
+    bool ignore_reductions) {
   FUSER_PERF_SCOPE("TransformReplay::selfReplay");
 
   std::vector<IterDomain*> new_self_logical = new_self->logical();
   std::vector<IterDomain*> self_logical = self->logical();
   if (ignore_reductions) {
-    // NOTE: We could also have reduction IDs involved in transformation that
-    // leads to allocation domain, so technically we should have included
-    // reduction IDs in the replay as well. The reason that we skipped them here
-    // is because this function is used by `RemoveBcastSqueeze`, where we could
-    // have mismatch reduction IDs on the logical between `self` and
-    // `new_self`.
     new_self_logical = TensorDomain::noReductions(new_self_logical);
     self_logical = TensorDomain::noReductions(self_logical);
   }
@@ -312,6 +306,7 @@ void TransformReplay::selfReplay(
     // Pushing the mapped IDs and corresponding contiguity flags
     for (size_t i : arange(self_allocation.size())) {
       IterDomain* id = self_allocation[i];
+      // FIXME: this is wrong when ignore_reductions=false.
       if (id->isReduction()) {
         continue;
       }
