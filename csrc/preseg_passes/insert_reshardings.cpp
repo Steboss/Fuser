@@ -157,14 +157,13 @@ void decomposeRowParallelLinearWithBias(Fusion* fusion) {
     }
 
     auto* without_bias = linear(linear_op->inA(), linear_op->inB());
-    TransformReplay::selfReplay(
-        out->domain(), without_bias->domain(), /*include_reductions=*/true);
+    TransformReplay::selfReplay(out->domain(), without_bias->domain());
 
     TensorView* broadcasted_bias =
         broadcast(linear_op->bias(), {true, true, false});
     TensorView* new_out = add(without_bias, broadcasted_bias);
     TransformReplay::selfReplay(
-        out->domain(), new_out->domain(), /*include_reductions=*/false);
+        out->domain(), new_out->domain(), /*ignore_reductions=*/true);
     ir_utils::replaceValInAllExprInputsAndFusionOutputs(out, new_out);
   }
 }

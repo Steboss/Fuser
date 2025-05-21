@@ -241,12 +241,12 @@ TensorDomain* TransformReplay::fullSelfReplay(
 void TransformReplay::selfReplay(
     const TensorDomain* self,
     TensorDomain* new_self,
-    bool include_reductions /* = false*/) {
+    bool ignore_reductions /* = false*/) {
   FUSER_PERF_SCOPE("TransformReplay::selfReplay");
 
   std::vector<IterDomain*> new_self_logical = new_self->logical();
   std::vector<IterDomain*> self_logical = self->logical();
-  if (!include_reductions) {
+  if (ignore_reductions) {
     // NOTE: We could also have reduction IDs involved in transformation that
     // leads to allocation domain, so technically we should have included
     // reduction IDs in the replay as well. The reason that we skipped them here
@@ -299,7 +299,7 @@ void TransformReplay::selfReplay(
     new_contiguity.reserve(self_allocation.size());
 
     // Push back the reduction IDs that are not mapped
-    if (!include_reductions) {
+    if (ignore_reductions) {
       for (auto id : new_self->logical()) {
         if (id->isReduction()) {
           new_alloc_domain.push_back(id);
@@ -340,7 +340,7 @@ void TransformReplay::selfReplay(
   std::vector<IterDomain*> self_loop = self->loop();
   if (self_loop != self->logical()) {
     std::vector<IterDomain*> new_loop;
-    if (!include_reductions) {
+    if (ignore_reductions) {
       self_loop = TensorDomain::noReductions(self_loop);
       for (auto id : new_self->logical()) {
         if (id->isReduction()) {

@@ -232,7 +232,7 @@ class NVF_API TransformReplay {
   static void selfReplay(
       const TensorDomain* self,
       TensorDomain* new_self,
-      bool include_reductions = false);
+      bool ignore_reductions = false);
 
   // Returns the loop position in producer that matches with `consumer_pos` in
   // consumer. Returns -1 if matching is impossible. This function can be used
