@@ -966,6 +966,7 @@ class CloneTmaCircularBufferLoopAndInsertSync
     // Use the if-then-else with electSync() predicate for the arrive expect
     // and cpAsyncBulk operations.
     kir::IfThenElse* if_expr = getElectSyncIfThenElse();
+    std::cout << "addTmaLoadBlock\t" << if_expr->toString() << std::endl;
 
     // Wait for WAR
     if (usesMBarrierForWAR()) {
@@ -984,6 +985,7 @@ class CloneTmaCircularBufferLoopAndInsertSync
     // Arrive expect tx for RAW
     if_expr->thenBody().push_back(mbarrier_arrive_tx_);
     if_expr->thenBody().push_back(expr);
+    std::cout << "addTmaLoadBlock\t" << if_expr->toString() << std::endl;
 
     mbarrier_arrive_tx_ = nullptr;
   }
