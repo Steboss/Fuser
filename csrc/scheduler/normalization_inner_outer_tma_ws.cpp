@@ -75,7 +75,7 @@ void getHeuristics(
   // (3) Used to cache partial outer reduction results
   // (4) overhead for indexing, etc.
   const bool is_circular_buffer_regs_cached = true;
-  rparams->is_non_circular_buffer_regs_cached = true;
+  rparams->is_non_circular_buffer_regs_cached = false;
   // Given a smem buffer size, calculate the number of registers pre thread
   // required to cache it in registers. The total required register size may be
   // larger than smem size due to non-divisible split.
@@ -123,7 +123,9 @@ void getHeuristics(
   // Performance on B200 for case 16K x 4K, bfloat, RMSNormBwd
   // (1) iter_unroll = 2, stages = 4, bdimx = 256, bdimy = 1, 50%
   // (2) iter_unroll = 4, stages = 2, bdimx = 256, bdimy = 1, 55%
-  // (2) inline cached input consumer at 2 instead of unroll, 57%
+  // (3) inline cached input consumer at 2 instead of unroll, 57%
+  // (4) revise register sharing from 32 to 40,               59%
+  // (4) is_non_circular_buffer_regs_cached = false           53%
   while (1) {
     bool is_updated = false;
 
@@ -199,15 +201,27 @@ void getHeuristics(
     int64_t reg_per_thread = getRegPerThreadGivenThreadsPerSM(total_threads);
     // Assume each padded threads keep [tma_branch_registers] registers and all
     // others are moved to computation threads. The granularity is 8.
-    // [tma_branch_registers] is a tunable parameter,
-    int64_t tma_branch_registers = 32;
-    int64_t compute_branch_registers = reg_per_thread +
-        (reg_per_thread - tma_branch_registers) * ws_padded_threads /
+    // [tma_branch_registers] is a tunable parameter. When estimated
+    // compute_branch_regs is not divisible by granularity, it is rounded down
+    // and needs to recompute tma_branch_registers.
+    // For example, assuming 256 computation threads, initial register = 168,
+    // then (168 - 32) * 128 / 256 = 68 which is not divisible by 8,
+    // compute_branch_registers = 168 + 68 = 236 --> rounded down to 232.
+    // re-calculate [tma_branch_registers] using:
+    // borrowed registers = (232 - 168) * 256 / 128 = 128.
+    // tma_branch_registers = 168 - 128 = 40
+    constexpr int64_t regs_granularity = 8;
+    int64_t tma_branch_regs = 32;
+    int64_t compute_branch_regs = reg_per_thread +
+        (reg_per_thread - tma_branch_regs) * ws_padded_threads /
             computation_threads;
-    compute_branch_registers =
-        scheduler_utils::roundDownToN(compute_branch_registers, 8);
-    ws.num_registers =
-        std::make_pair(tma_branch_registers, compute_branch_registers);
+    if (compute_branch_regs % regs_granularity != 0) {
+      compute_branch_regs -= compute_branch_regs % regs_granularity;
+      tma_branch_regs = reg_per_thread -
+          (compute_branch_regs - reg_per_thread) * computation_threads /
+              ws_padded_threads;
+    }
+    ws.num_registers = std::make_pair(tma_branch_regs, compute_branch_regs);
   }
   CircularBufferOptions circular_buffer_options{
       .type = ws, .stage = n_stages, .prefetch = n_stages - 1};
@@ -661,8 +675,8 @@ void scheduleFusion(Fusion* fusion, const ReductionParams* rparams) {
       // factor. Here, we only need to further confirm all the iteration
       // domains are contiguous.
       auto can_vectorize = [](TensorView* redu_tv, TensorView* bcast_tv) {
-        const auto& alloc_dom_1 = redu_tv->getMaybeAllocationDomain();
-        const auto& alloc_dom_2 = bcast_tv->getMaybeAllocationDomain();
+        const auto& alloc_dom_1 = redu_tv->getMaybeRootDomain();
+        const auto& alloc_dom_2 = bcast_tv->getMaybeRootDomain();
         if (alloc_dom_1.size() != alloc_dom_2.size()) {
           return false;
         }
@@ -697,18 +711,20 @@ void scheduleFusion(Fusion* fusion, const ReductionParams* rparams) {
         // concern.
         for (auto consumer : ir_utils::consumerTvsOf(cached_tv)) {
           // consumer->axis(2)->parallelize(ParallelType::Unroll);
-          if (ir_utils::getSoleProducerTv(consumer)->nDims() >= tma_inline_pos + 1) {
+          if (ir_utils::getSoleProducerTv(consumer)->nDims() >=
+              tma_inline_pos + 1) {
             tv_inline_pos_map.emplace(consumer, tma_inline_pos);
           }
         }
         // for (auto tv : fusion->allTvs()) {
-        //   if (tv->definition() != nullptr && tv->definition()->isA<UnaryOp>() &&
+        //   if (tv->definition() != nullptr && tv->definition()->isA<UnaryOp>()
+        //   &&
         //       tv->definition()->as<UnaryOp>()->getUnaryOpType() ==
         //           UnaryOpType::Reciprocal) {
         //     std::cout << "WAR expr sort tv: " << tv->toString() << std::endl;
         //     tv_inline_pos_map.emplace(tv, 2);
         //   }
-        // }        
+        // }
       }
     }
 
