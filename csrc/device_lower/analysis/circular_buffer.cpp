@@ -98,6 +98,18 @@ int64_t getCircularBufferAxisPosition(const TensorView* tv) {
   // loop.
   return getInnerMostCircularBufferPosition(tv);
 }
+// If multiple computation warp groups are used, move insertion position
+// to the next for-loop to sync the load for different warp groups separately.
+int64_t getInsertPosition(
+    int64_t inner_pos,
+    int64_t outer_pos,
+    int64_t warp_groups) {
+  int64_t insertion_position = inner_pos - outer_pos + 1;
+  if (warp_groups > 1) {
+    insertion_position += 1;
+  }
+  return insertion_position;
+}
 
 // Initial inspection of a fusion to find and validate circular buffered tensors
 class CircularBufferFusionInspector : private IterVisitor {
@@ -234,6 +246,11 @@ void CircularBufferInfo::build(Fusion* fusion) {
 bool CircularBufferInfo::isCircularBufferedIterDomain(IterDomain* id) {
   auto concrete_loop_id = lower_utils::getConcreteLoopID(id);
   return concrete_circular_buffered_loop_id_.count(concrete_loop_id);
+}
+
+bool CircularBufferInfo::isComputationWarpGroupIterDomain(IterDomain* id) {
+  auto concrete_loop_id = lower_utils::getConcreteLoopID(id);
+  return computation_warp_groups_loop_id_.count(concrete_loop_id);
 }
 
 CircularBufferInfo::TvInfo& CircularBufferInfo::getTvInfo(
@@ -417,9 +434,7 @@ void CircularBufferInfo::setCircularBufferTv(const TensorView* tv) {
   circular_buffer_tvs_[concrete_loop_id].insert(tv);
   // Set and validate the new stage depth.
   setCircularBufferOptions(cb_axis, tv->circularBufferOptions());
-
-  independent_compute_warp_groups_ = hasIndependentWarpGroups(tv);
-
+  setComputationWarpGroups(tv);
   setCircularBufferInsertionPosition(tv, cb_axis);
 }
 
@@ -434,13 +449,13 @@ void CircularBufferInfo::setCircularBufferOptions(
   if (maybe_existing_depth_it == circular_buffer_options_.end()) {
     circular_buffer_options_[concrete_loop_id] = opt;
     // Set the warp specialized dim and ensure there is only one
+    auto old_pt = warp_specialized_on_;
     if (std::holds_alternative<WarpSpecialized>(opt.type)) {
       auto ws_pt = std::get<WarpSpecialized>(opt.type).on;
       NVF_ERROR(
-          warp_specialized_on_ == ParallelType::Serial ||
-              warp_specialized_on_ == ws_pt,
+          old_pt == ParallelType::Serial || old_pt == ws_pt,
           "Multiple warp specialization is not supported: ",
-          warp_specialized_on_,
+          old_pt,
           " and ",
           ws_pt);
       warp_specialized_on_ = ws_pt;
@@ -457,6 +472,45 @@ void CircularBufferInfo::setCircularBufferOptions(
         " by ",
         concrete_loop_id->toString());
   }
+}
+
+// Derive number of computation warp groups from loop domain of its consumer
+// For example, in normalization kernel:
+// circular buffer: Ts[BIDy, Circular(S), compute groups(S),...], ca 2
+// its consumer is: Tl[BIDy, Circular(S), compute groups(TIDy),...], ca 3
+// Look for the corresponding loop domain in its consumer and make sure it
+// is parallelized same as warp specialized dim. Then, its content represents
+// number of computation warp groups.
+
+// TODO: Another approach is we can just save `computation_warp_groups_`
+// in  `circularBufferOptions` since it is a scheduler parameter.
+void CircularBufferInfo::setComputationWarpGroups(const TensorView* tv) {
+  auto option = tv->circularBufferOptions();
+  auto old_val = computation_warp_groups_;
+  // -1 indicates not set yet, if set, should not change
+  int64_t new_val = (old_val == -1) ? 1 : old_val;
+  if (std::holds_alternative<WarpSpecialized>(option.type)) {
+    auto ws_pt = std::get<WarpSpecialized>(option.type).on;
+    int64_t next_pos = getInnerMostCircularBufferPosition(tv) + 1;
+    auto consumer = ir_utils::consumerTvsOf(tv).at(0);
+    if (consumer->nDims() > next_pos &&
+        consumer->axis(next_pos)->getParallelType() == ws_pt &&
+        consumer->axis(next_pos)->extent()->isConst() &&
+        tv->axis(next_pos)->extent()->isConst() &&
+        tv->axis(next_pos)->getParallelType() == ParallelType::Serial &&
+        consumer->axis(next_pos)->extent()->value().as<int64_t>() ==
+            tv->axis(next_pos)->extent()->value().as<int64_t>()) {
+      new_val = consumer->axis(next_pos)->extent()->value().as<int64_t>();
+      computation_warp_groups_loop_id_.insert(tv->axis(next_pos));
+    }
+  }
+  NVF_ERROR(
+      old_val == -1 || old_val == new_val,
+      "Different number of computation warp group is not supported: ",
+      old_val,
+      " and ",
+      new_val);
+  computation_warp_groups_ = new_val;
 }
 
 IterDomain* CircularBufferInfo::getCircularBufferAxis(
@@ -555,10 +609,10 @@ void CircularBufferInfo::setCircularBufferInsertionPosition(
   // When outer_most != inner_most position, then the mbarrier synchronization
   // is placed at inner_most for-loop. The insertion_point is the number of
   // nested for-loops relative to the outer_most position.
-  int64_t insertion_position = inner_most_circular_buffer_position -
-      outer_most_circular_buffer_position + 1;
-  circular_buffer_insertion_position_[circular_buffer_axis] =
-      insertion_position;
+  circular_buffer_insertion_position_[circular_buffer_axis] = getInsertPosition(
+      inner_most_circular_buffer_position,
+      outer_most_circular_buffer_position,
+      computation_warp_groups_);
 }
 
 namespace {
@@ -600,7 +654,8 @@ Val* CircularBufferInfo::getLinearIndex(
       getForLoopIndex(circular_buffer_tv, loops, /*is_inner_most_axis=*/false);
 
   // Calculate insertion position.
-  int64_t insertion_position = inner_loop_index - outer_loop_index + 1;
+  int64_t insertion_position = getInsertPosition(
+      inner_loop_index, outer_loop_index, computation_warp_groups_);
   return getLinearIndexRelativeForLoopStack(
       loops, insertion_position, /*start=*/outer_loop_index);
 }

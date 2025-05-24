@@ -146,7 +146,7 @@ void getHeuristics(
     // increase bdimy when bdimx is not increased
     // multiple independent computation groups only supports bdimx == 128
     // disable this option for now as runtime is not ready yet.
-    if (false && bdimx == 128 &&
+    if (bdimy == 1 && bdimx == 128 &&
         is_enough_smem(iter_unroll, n_stages, bdimx, bdimy * 2)) {
       is_updated = true;
       bdimy *= 2;

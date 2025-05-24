@@ -162,10 +162,10 @@ class CudaKernelGenerator : private kir::ConstIrVisitor {
       const LaunchParams& lparams) {
     CudaKernelGenerator codegen(kernel);
     codegen.lparams_ = lparams;
-    codegen.has_warp_specialized_ =
-        kernel->summary().circular_buffer_info.hasWarpSpecialized();
     codegen.warp_specialized_on_ =
         kernel->summary().circular_buffer_info.getWarpSpecializedOn();
+    codegen.computation_warp_groups_ =
+        kernel->summary().circular_buffer_info.getComputationWarpGroups();
     codegen.genDeclaration(kernel_name);
     codegen.startBlock();
     codegen.genPrologue();
@@ -2996,6 +2996,30 @@ class CudaKernelGenerator : private kir::ConstIrVisitor {
     indent() << genCall("blockIterGroupedYdimReduce", template_args, func_args)
              << ";\n";
   }
+
+  std::string genSmemOffset() {
+    std::stringstream offset_ss;
+    offset_ss << genVariableName(
+        NamedScalar::getParallelIndex(warp_specialized_on_));
+    offset_ss << " * " << lparams_.bdimx();
+    if (kernel_->summary().all_block_reductions_are_warp_reduction) {
+      offset_ss << " / 32";
+    }
+    return offset_ss.str();
+  }
+
+  std::string genBarrierId(bool is_computation_warp_groups) {
+    std::stringstream ss;
+    if (is_computation_warp_groups) {
+      ss << next_barrier_id_ << " + "
+         << genInline(NamedScalar::getParallelIndex(warp_specialized_on_));
+      next_barrier_id_ += computation_warp_groups_;
+    } else {
+      ss << "(uint32_t)" << next_barrier_id_;
+      next_barrier_id_++;
+    }
+    return ss.str();
+  }
   void genGroupedWarpReduction(
       const int num_grouped_iterations,
       kir::TensorIndex* output,
@@ -3007,7 +3031,13 @@ class CudaKernelGenerator : private kir::ConstIrVisitor {
     func_args.arg(genVariableNameConvertAlignedArray(output));
     func_args.arg(genVariableNameConvertAlignedArray(input));
     func_args.arg(genReductionOp(reduction_op_type, output->dtype()));
-    func_args.arg(genStaticCast(genPtrType(output->dtype()), "shared_mem"));
+    if (computation_warp_groups_ > 1) {
+      func_args.arg(
+          genStaticCast(genPtrType(output->dtype()), "shared_mem") + " + " +
+          genSmemOffset());
+    } else {
+      func_args.arg(genStaticCast(genPtrType(output->dtype()), "shared_mem"));
+    }
 
     ArgumentBuilder template_args;
     template_args.arg(kernel_->getWarpPaddedParallelInfo().is_tidx_single_warp);
@@ -3017,6 +3047,9 @@ class CudaKernelGenerator : private kir::ConstIrVisitor {
         warp_specialized_on_ == ParallelType::TIDx
             ? lparams_.bdimx() - ws_padded_threads
             : lparams_.bdimx());
+    if (computation_warp_groups_ > 1) {
+      func_args.arg(genBarrierId(true));
+    }
     indent() << genCall(
                     "warp::iterGroupedStaticWarpAllReduce",
                     template_args,
@@ -3644,7 +3677,8 @@ class CudaKernelGenerator : private kir::ConstIrVisitor {
         .arg(bidz)
         .arg(/*PERSISTENT=*/true)
         .arg(/*Aligned=*/
-             has_warp_specialized_ ? false : isAligned());
+             warp_specialized_on_ != ParallelType::Serial ? false
+                                                          : isAligned());
 
     auto sync_idx = genCall(
         "index_utils::maskedOffset",
@@ -3663,7 +3697,9 @@ class CudaKernelGenerator : private kir::ConstIrVisitor {
         .append("]");
     sync_call_args.arg(sync_segment_size);
     sync_call_args.arg(genComputeBlockDim());
-
+    if (computation_warp_groups_ > 1) {
+      sync_call_args.arg(genBarrierId(/*is_computation_warp_groups=*/false));
+    }
     auto sync_call =
         genCall("grid_sync::sync", sync_call_template_parms, sync_call_args);
 
@@ -3865,10 +3901,14 @@ class CudaKernelGenerator : private kir::ConstIrVisitor {
   std::unordered_set<std::string> generated_utilities_;
   //! iterGroupedStaticWarpAllReduce requires static threads per CTA
   LaunchParams lparams_;
-  //! Whether the kernel has warp specialization
-  bool has_warp_specialized_ = false;
-  //! Warp specialized on parallel type
+  //! warp specialization, serial means not used
   ParallelType warp_specialized_on_ = ParallelType::Serial;
+
+  //! Number of computation warp groups
+  int64_t computation_warp_groups_ = 1;
+
+  //! Track barrier ids used in the kernel
+  int64_t next_barrier_id_ = 1;
 };
 
 } // namespace
