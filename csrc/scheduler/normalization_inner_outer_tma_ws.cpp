@@ -75,7 +75,7 @@ void getHeuristics(
   // (3) Used to cache partial outer reduction results
   // (4) overhead for indexing, etc.
   const bool is_circular_buffer_regs_cached = true;
-  const bool is_non_circular_buffer_regs_cached = true;
+  rparams->is_non_circular_buffer_regs_cached = true;
   // Given a smem buffer size, calculate the number of registers pre thread
   // required to cache it in registers. The total required register size may be
   // larger than smem size due to non-divisible split.
@@ -96,7 +96,7 @@ void getHeuristics(
     }
 
     // cache non-circular buffered tv
-    if (is_non_circular_buffer_regs_cached) {
+    if (rparams->is_non_circular_buffer_regs_cached) {
       reg_count +=
           smem_to_regs(non_circular_buffered_smem_size, bdimx, iter_unroll);
     }
@@ -120,13 +120,13 @@ void getHeuristics(
       is_enough_smem(iter_unroll, n_stages, bdimx, bdimy),
       "Not enough shared memory for TMA warp specialized.");
   // Try to update paras in each loop and break if no update is made.
+  // Performance on B200 for case 16K x 4K, bfloat, RMSNormBwd
+  // (1) iter_unroll = 2, stages = 4, bdimx = 256, bdimy = 1, 50%
+  // (2) iter_unroll = 4, stages = 2, bdimx = 256, bdimy = 1, 55%
+  // (2) inline cached input consumer at 2 instead of unroll, 57%
   while (1) {
     bool is_updated = false;
-    // increase circular buffer stages
-    if (is_enough_smem(iter_unroll, n_stages * 2, bdimx, bdimy)) {
-      is_updated = true;
-      n_stages *= 2;
-    }
+
     // increase iter_unroll
     // iter_unroll should be divisible by outer_dim_numel due to limitation of
     // 1D TMA predicate.
@@ -135,6 +135,13 @@ void getHeuristics(
       is_updated = true;
       iter_unroll *= 2;
     }
+
+    // increase circular buffer stages
+    if (is_enough_smem(iter_unroll, n_stages * 2, bdimx, bdimy)) {
+      is_updated = true;
+      n_stages *= 2;
+    }
+
     // increase bdimx but don't exceed 256 and only when
     // registers are not enough, e.g. each thread has too many elements.
     if (bdimx <= 128 && !is_enough_regs(iter_unroll, bdimx) &&
@@ -516,7 +523,6 @@ void scheduleFusion(Fusion* fusion, const ReductionParams* rparams) {
       inner_reduction_tvs,
       unroll_vectorizable_cached_tvs,
       {selected_tvs_inner.begin(), selected_tvs_inner.end()});
-
   // Propagate outer reduction. Each outer reduction is connected with its
   // cached_gmem and output, since we added all the cached_gmem to the
   // boundaryNodesSet, the transformation from one outer reduction can't
@@ -690,8 +696,19 @@ void scheduleFusion(Fusion* fusion, const ReductionParams* rparams) {
         // consumers may lead to better performance if register usage is not a
         // concern.
         for (auto consumer : ir_utils::consumerTvsOf(cached_tv)) {
-          consumer->axis(2)->parallelize(ParallelType::Unroll);
+          // consumer->axis(2)->parallelize(ParallelType::Unroll);
+          if (ir_utils::getSoleProducerTv(consumer)->nDims() >= tma_inline_pos + 1) {
+            tv_inline_pos_map.emplace(consumer, tma_inline_pos);
+          }
         }
+        // for (auto tv : fusion->allTvs()) {
+        //   if (tv->definition() != nullptr && tv->definition()->isA<UnaryOp>() &&
+        //       tv->definition()->as<UnaryOp>()->getUnaryOpType() ==
+        //           UnaryOpType::Reciprocal) {
+        //     std::cout << "WAR expr sort tv: " << tv->toString() << std::endl;
+        //     tv_inline_pos_map.emplace(tv, 2);
+        //   }
+        // }        
       }
     }
 

@@ -140,6 +140,8 @@ class ReductionParams : public HeuristicParams {
   // TMA warp specialized, only used in inner-outer persistent scheduler
   bool tma_warp_specialized = false;
 
+  bool is_non_circular_buffer_regs_cached = true;
+
   // Circular buffer used in tma warp specialized normalization
   CircularBufferOptions circular_buffer_options;
 
