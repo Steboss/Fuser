@@ -434,6 +434,7 @@ void CircularBufferInfo::setCircularBufferTv(const TensorView* tv) {
   circular_buffer_tvs_[concrete_loop_id].insert(tv);
   // Set and validate the new stage depth.
   setCircularBufferOptions(cb_axis, tv->circularBufferOptions());
+  independent_compute_warp_groups_ = hasIndependentWarpGroups(tv);
   setComputationWarpGroups(tv);
   setCircularBufferInsertionPosition(tv, cb_axis);
 }

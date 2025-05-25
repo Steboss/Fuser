@@ -139,27 +139,26 @@ void getHeuristics(
     }
 
     // increase circular buffer stages
-    if (is_enough_smem(iter_unroll, n_stages * 2, bdimx, bdimy)) {
+    if (n_stages == 1 && is_enough_smem(iter_unroll, n_stages * 2, bdimx, bdimy)) {
       is_updated = true;
       n_stages *= 2;
     }
 
-    // increase bdimx but don't exceed 256 and only when
-    // registers are not enough, e.g. each thread has too many elements.
-    if (bdimx <= 128 && !is_enough_regs(iter_unroll, bdimx) &&
-        is_enough_smem(iter_unroll, n_stages, bdimx * 2, bdimy)) {
-      is_updated = true;
-      bdimx *= 2;
-    }
-
-    // increase bdimy when bdimx is not increased
-    // multiple independent computation groups only supports bdimx == 128
-    // disable this option for now as runtime is not ready yet.
+    // increase bdimy when bdimx is not increased since multiple independent
+    // computation groups only supports bdimx == 128
     if (bdimy == 1 && bdimx == 128 &&
         is_enough_smem(iter_unroll, n_stages, bdimx, bdimy * 2)) {
       is_updated = true;
       bdimy *= 2;
     }
+    // increase bdimx but don't exceed 256 and only when
+    // registers are not enough, e.g. each thread has too many elements.
+    if (bdimy == 1 && bdimx <= 128 && !is_enough_regs(iter_unroll, bdimx) &&
+        is_enough_smem(iter_unroll, n_stages, bdimx * 2, bdimy)) {
+      is_updated = true;
+      bdimx *= 2;
+    }
+
     if (!is_updated) {
       break;
     }
@@ -195,6 +194,9 @@ void getHeuristics(
   // ping-pong computations.
   ParallelType ws_pt = bdimx > 128 ? ParallelType::TIDx : ParallelType::TIDy;
   WarpSpecialized ws(ws_pt);
+  if(bdimy > 1){
+    ws.stage_slice_position = 3;
+  }
   int64_t computation_threads = bdimx * bdimy;
   int64_t total_threads = ws_padded_threads + computation_threads;
   if (total_threads > 256) {
@@ -226,7 +228,7 @@ void getHeuristics(
   CircularBufferOptions circular_buffer_options{
       .type = ws, .stage = n_stages, .prefetch = n_stages - 1};
   rparams->circular_buffer_options = circular_buffer_options;
-
+  rparams->computation_warp_groups = bdimy;
   rparams->unroll_factor_iter_dom = iter_unroll;
   rparams->vectorization_factor_outer = vectorization_factor_outer;
   rparams->vectorization_factor_tmp_gmem_write = tmp_gmem_write_vect;
@@ -244,7 +246,7 @@ void getHeuristics(
       LaunchParams::UNINITIALIZED_VAL,
       n_stages > 1 && ws_pt == ParallelType::TIDx ? bdimx + ws_padded_threads
                                                   : bdimx,
-      LaunchParams::UNINITIALIZED_VAL,
+      ws_pt == ParallelType::TIDy ? bdimy + 1 : bdimy,
       LaunchParams::UNINITIALIZED_VAL);
 
   rparams->tag = "TMA Warp Specialized Persistent Heuristic.\n";
@@ -312,16 +314,26 @@ void scheduleOuterReduction(
     // First-stage of outer reduction
     // [R, I]
     std::vector<int64_t> rfactor_axes{0};
+    int64_t extra_rfactor_axis = -1;
     if (rparams->unroll_factor_iter_dom > 1) {
       // [R/Unroll, Unroll]
       // Should mark as serial to avoid unrolling the outer reduction
       // which requires extra registers
       outer_reduction_tv->split(0, rparams->unroll_factor_iter_dom);
       outer_reduction_tv->axis(1)->parallelize(ParallelType::Serial);
-      rfactor_axes.push_back(2);
+      extra_rfactor_axis = 2;
     }
     // [R/Unroll/BIDy, BIDy, Unroll]
     outer_reduction_tv->split(0, rparams->lparams.gdimy());
+
+    // [R/Unroll/BIDy/TIDy, TIDy, BIDy, Unroll]
+    if (rparams->computation_warp_groups > 1) {
+      outer_reduction_tv->split(0, rparams->computation_warp_groups);
+      extra_rfactor_axis = 3;
+    }
+    if (rparams->unroll_factor_iter_dom > 1) {
+      rfactor_axes.push_back(extra_rfactor_axis);
+    }
 
     TensorView* partialResult = outer_reduction_tv->rFactor(rfactor_axes);
     partialResult->cacheBefore();
@@ -333,38 +345,37 @@ void scheduleOuterReduction(
     cached_gmem_reload.emplace_back(partialResultReload);
 
     // Second-stage of outer reduction
-    // Unroll 1 to WAR bug in validateAndPropagatePType which propagates BIDy
-    // to final outer reduction domain {132}
-    // reduction domain, [I1/Unroll, Unroll]
-    outer_reduction_tv->split(0, 1);
-    outer_reduction_tv->axis(1)->parallelize(ParallelType::Unroll);
+    if (rparams->computation_warp_groups > 1) {
+      // reduction domain, [BDIMy, GDIMy, ...]
+      outer_reduction_tv->axis(0)->parallelize(ParallelType::TIDy);
+    } else {
+      // Unroll 1 to WAR bug in validateAndPropagatePType which propagates BIDy
+      // to final outer reduction domain {132}
+      // reduction domain, [GDIMy, ...] --> [I1/Unroll, Unroll]
+      outer_reduction_tv->split(0, 1);
+      outer_reduction_tv->axis(1)->parallelize(ParallelType::Unroll);
+    }
     // iteration domain, [BIDy, TIDx, Vect]
     int axisID = -1;
     if (rparams->vectorization_factor_outer > 1) {
       outer_reduction_tv->split(axisID, rparams->vectorization_factor_outer);
       outer_reduction_tv->axis(axisID--)->parallelize(ParallelType::Vectorize);
     }
-
     if (rparams->lparams.bdimx() > 1) {
-      int64_t compute_bdimx = rparams->lparams.bdimx();
-      if (std::holds_alternative<WarpSpecialized>(
-              rparams->circular_buffer_options.type) &&
-          std::get<WarpSpecialized>(rparams->circular_buffer_options.type).on ==
-              ParallelType::TIDx) {
-        compute_bdimx = rparams->lparams.bdimx() - 128;
-      }
-
-      outer_reduction_tv->split(axisID, compute_bdimx);
+      outer_reduction_tv->split(axisID, rparams->lparams.bdimx());
       outer_reduction_tv->axis(axisID--)->parallelize(ParallelType::TIDx);
     }
-
     if (rparams->combined_split_grid_inner_dim) {
       outer_reduction_tv->split(
           axisID, NamedScalar::getParallelDim(ParallelType::BIDy));
     }
 
     outer_reduction_tv->axis(axisID--)->parallelize(ParallelType::BIDy);
-    outer_reference_tvs.emplace_back(outer_reduction_tv);
+    auto outer_reference_tv = outer_reduction_tv;
+    if (rparams->computation_warp_groups > 1) {
+      outer_reference_tv = outer_reduction_tv->rFactor({1});
+    }
+    outer_reference_tvs.emplace_back(outer_reference_tv);
   }
 }
 
@@ -574,6 +585,9 @@ void scheduleFusion(Fusion* fusion, const ReductionParams* rparams) {
   if (rparams->tma_warp_specialized) {
     for (auto tv : tma_load_tvs) {
       tv->axis(-1)->parallelize(ParallelType::Bulk);
+      if (rparams->computation_warp_groups > 1 && tv->nDims() > 3) {
+        tv->axis(2)->parallelize(ParallelType::Serial);
+      }
     }
   }
 
@@ -694,10 +708,12 @@ void scheduleFusion(Fusion* fusion, const ReductionParams* rparams) {
       for (auto cached_tv : cached_inputs) {
         if (cached_tv->hasBroadcast() &&
             is_redu_mapped_to_bcast(inner_reference_tv, cached_tv)) {
+          int64_t last_iter_dim = rparams->computation_warp_groups > 1 ? 3 : 2;
           if (can_vectorize(inner_reference_tv, cached_tv)) {
-            cached_tv->axis(2)->parallelize(ParallelType::Vectorize);
+            cached_tv->axis(last_iter_dim)
+                ->parallelize(ParallelType::Vectorize);
           } else {
-            cached_tv->axis(2)->parallelize(ParallelType::Unroll);
+            cached_tv->axis(last_iter_dim)->parallelize(ParallelType::Unroll);
           }
         }
         // Unroll the consumers to prevent inlineMost from inlining them
@@ -727,6 +743,7 @@ void scheduleFusion(Fusion* fusion, const ReductionParams* rparams) {
         // }
       }
     }
+    fusion->printMath();
 
     std::unordered_set<TensorView*> exclude_tvs;
     for (auto [k, v] : tv_inline_pos_map) {

@@ -348,6 +348,10 @@ TensorView* scheduleReductionTV(
     NVF_ERROR(vec_id_cur_pos != -1, "Vectorized ID not found");
     reduction_rf_tv->reorder(vec_reorder_map);
   }
+  if(rparams->computation_warp_groups > 1){
+    reduction_rf_tv->reorder({{1,2}});
+    std::cout << "reduction_rf_tv " << reduction_rf_tv->toString() << std::endl;
+  }
 
   return reduction_rf_tv;
 }

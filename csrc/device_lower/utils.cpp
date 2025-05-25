@@ -804,7 +804,7 @@ AllocPosInfo getAllocPosInfo(
   // The actual compute at position is moved one step further to separate
   // loading for different compute warp groups.
   int64_t stop_pos = tv->getComputeAtPosition();
-  if (gpu_lower->circularBufferInfo().getComputationWarpGroups() > 1 &&
+  if (gpu_lower->circularBufferInfo().hasIndependentComputeWarpGroups() &&
       tv->isCircularBuffered()) {
     stop_pos += 1;
   }

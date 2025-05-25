@@ -996,15 +996,16 @@ class CloneTmaCircularBufferLoopAndInsertSync
   // kir::MBarrierArriveExpectTx.
   Val* getSizeOfTmaLoad(LoadStoreOp* ldst) {
     NVF_ERROR(ldst != nullptr);
-    auto gpu_lower = GpuLower::current();
 
     TensorView* consumer_tv = ldst->out()->as<TensorView>();
     NVF_ERROR(
-        gpu_lower->consumerToTMAInfo().count(consumer_tv),
+        GpuLower::current()->consumerToTMAInfo().count(consumer_tv),
         "Unable to find TMA info for consumer_tv: ",
         consumer_tv->toString());
+
     // Get expected bytes for given TMA load operation.
-    const TMAInfo& tma_info = gpu_lower->consumerToTMAInfo().at(consumer_tv);
+    const TMAInfo& tma_info =
+        GpuLower::current()->consumerToTMAInfo().at(consumer_tv);
     Val* expected_bytes = tma_info.tileSizeBytes();
 
     size_t start_idx = consumer_tv->getComputeAtPosition();
@@ -1018,6 +1019,10 @@ class CloneTmaCircularBufferLoopAndInsertSync
       }
     }
 
+    // The expected_bytes for mbarrier::arriveExpectTX must account for all TMA
+    // load operations launched for each circular buffer stage. We take the
+    // product of all coordinate TMA iterDomains to the right of the circular
+    // buffer axis.
     const std::vector<IterDomain*>& loop_domain = consumer_tv->getLoopDomain();
     for (size_t idx = start_idx; idx < loop_domain.size(); ++idx) {
       IterDomain* id = loop_domain.at(idx);
@@ -1456,7 +1461,6 @@ ForLoop* createArrivesForWar(ForLoop* circular_buffer_loop) {
     }
     mbarriers.pushBack(it->second);
   }
-
   auto prefetch_loop = ir_utils::createRangeLoop(opt.prefetch + 1);
 
   // If compute warp groups are independent, then only the first compute warp
@@ -1484,16 +1488,12 @@ ForLoop* createArrivesForWar(ForLoop* circular_buffer_loop) {
             prefetch_loop->indexOrStartIfTrivial(), opt.stage));
     auto prefetch = IrBuilder::create<kir::MBarrierArrive>(
         /*state=*/nullptr, mbarrier_to_arrive);
-    if (independent_compute_warp_groups) {
+    if (ite != nullptr) {
       ite->thenBody().push_back(prefetch);
     } else {
       prefetch_loop->body().push_back(prefetch);
     }
   }
-  if (independent_compute_warp_groups) {
-    prefetch_loop->body().push_back(ite);
-  }
-
   return prefetch_loop;
 }
 

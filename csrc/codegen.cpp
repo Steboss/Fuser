@@ -316,7 +316,7 @@ class CudaKernelGenerator : private kir::ConstIrVisitor {
           "Undefined behavior to increase register count from ",
           initial_reg_count,
           " to ",
-          increased_register_count);
+          increased_register_count, ". num_threads_per_cta = ", num_threads_per_cta);
 
       // leave a space between launch bound and kernel name
       code_ << "__launch_bounds__(/*maxThreadsPerBlock=*/"
