@@ -470,17 +470,21 @@ LaunchParams KernelExecutor::computeLaunchParams(
     if (kernel_summary.all_block_reductions_are_warp_reduction) {
       n_compute_threads_or_warps /= 32;
     }
+    std::cout << "n_compute_threads_or_warps: "
+              << n_compute_threads_or_warps << std::endl;
 
     reduction_broadcast_workspace =
         (int64_t)dataTypeSize(
             kernel_summary.largest_smem_data_type, index_type) *
         grouped_iter_factor * welford_factor * n_compute_threads_or_warps;
-
+        std::cout << "welford_factor: " << welford_factor << std::endl;
+        std::cout << "grouped_iter_factor: " << grouped_iter_factor << std::endl;
     if (kernel_summary.has_outer_grouped_grid_welford) {
       reduction_broadcast_workspace = std::max(
           reduction_broadcast_workspace,
           (int64_t)kernel_summary.outer_grouped_grid_welford_largest_smem_size);
     }
+    std::cout << "reduction_broadcast_workspace: " << reduction_broadcast_workspace << std::endl;
 
     // StackBasedSharedMemAllocator start from address 0 without considering the
     // shared memory reserved for reduction and broadcast workspace which is

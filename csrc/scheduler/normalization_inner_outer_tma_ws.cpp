@@ -139,14 +139,15 @@ void getHeuristics(
     }
 
     // increase circular buffer stages
-    if (n_stages == 1 && is_enough_smem(iter_unroll, n_stages * 2, bdimx, bdimy)) {
+    if (n_stages == 1 &&
+        is_enough_smem(iter_unroll, n_stages * 2, bdimx, bdimy)) {
       is_updated = true;
       n_stages *= 2;
     }
 
     // increase bdimy when bdimx is not increased since multiple independent
     // computation groups only supports bdimx == 128
-    if (bdimy == 1 && bdimx == 128 &&
+    if (bdimy == 10 && bdimx == 128 &&
         is_enough_smem(iter_unroll, n_stages, bdimx, bdimy * 2)) {
       is_updated = true;
       bdimy *= 2;
@@ -194,7 +195,7 @@ void getHeuristics(
   // ping-pong computations.
   ParallelType ws_pt = bdimx > 128 ? ParallelType::TIDx : ParallelType::TIDy;
   WarpSpecialized ws(ws_pt);
-  if(bdimy > 1){
+  if (bdimy > 1) {
     ws.stage_slice_position = 3;
   }
   int64_t computation_threads = bdimx * bdimy;
@@ -362,7 +363,13 @@ void scheduleOuterReduction(
       outer_reduction_tv->axis(axisID--)->parallelize(ParallelType::Vectorize);
     }
     if (rparams->lparams.bdimx() > 1) {
-      outer_reduction_tv->split(axisID, rparams->lparams.bdimx());
+      int64_t compute_bdimx = rparams->lparams.bdimx();
+      if (rparams->circular_buffer_options.isEnable() &&
+          std::get<WarpSpecialized>(rparams->circular_buffer_options.type).on ==
+              ParallelType::TIDx) {
+        compute_bdimx -= ws_padded_threads;
+      }
+      outer_reduction_tv->split(axisID, compute_bdimx);
       outer_reduction_tv->axis(axisID--)->parallelize(ParallelType::TIDx);
     }
     if (rparams->combined_split_grid_inner_dim) {

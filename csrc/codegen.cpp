@@ -316,7 +316,9 @@ class CudaKernelGenerator : private kir::ConstIrVisitor {
           "Undefined behavior to increase register count from ",
           initial_reg_count,
           " to ",
-          increased_register_count, ". num_threads_per_cta = ", num_threads_per_cta);
+          increased_register_count,
+          ". num_threads_per_cta = ",
+          num_threads_per_cta);
 
       // leave a space between launch bound and kernel name
       code_ << "__launch_bounds__(/*maxThreadsPerBlock=*/"
@@ -426,6 +428,9 @@ class CudaKernelGenerator : private kir::ConstIrVisitor {
                            << kernel_summary.largest_smem_data_type << ")";
           if (has_parallel_welford) {
             smem_buf_size_ss << " * 3";
+          }
+          if (kernel_summary.num_grouped_iterations > 1) {
+            smem_buf_size_ss << " * " << kernel_summary.num_grouped_iterations;
           }
           if (kernel_summary.all_block_reductions_are_warp_reduction) {
             smem_buf_size_ss << " / 32";
@@ -3002,6 +3007,9 @@ class CudaKernelGenerator : private kir::ConstIrVisitor {
     offset_ss << genVariableName(
         NamedScalar::getParallelIndex(warp_specialized_on_));
     offset_ss << " * " << lparams_.bdimx();
+    if (kernel_->summary().num_grouped_iterations > 1) {
+      offset_ss << " * " << kernel_->summary().num_grouped_iterations;
+    }
     if (kernel_->summary().all_block_reductions_are_warp_reduction) {
       offset_ss << " / 32";
     }
