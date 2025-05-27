@@ -351,6 +351,10 @@ bool hasIndependentWarpGroups(const TensorView* tv) {
 
   // Step 5: Use independent warp groups if warp specialized axis is to the
   // left of the stage_slice_position
+  NVF_ERROR(
+      warp_specialized.stage_slice_position.value() <= ws_id_producer_pos,
+      "stage_slice_position can't to the right of warp specialized position: ",
+      tv->toString());
   return ws_id_producer_pos < warp_specialized.stage_slice_position.value();
 }
 
@@ -626,24 +630,25 @@ int64_t getForLoopIndex(
 Val* CircularBufferInfo::getLinearIndex(
     TensorView* circular_buffer_tv,
     const std::vector<ForLoop*>& loops) const {
-  int64_t inner_loop_index =
-      getForLoopIndex(circular_buffer_tv, loops, /*is_inner_most_axis=*/true);
-
+  auto circular_buffer_type = circular_buffer_tv->circularBufferOptions().type;
+  bool is_warp_specialized =
+      std::holds_alternative<WarpSpecialized>(circular_buffer_type);
   // short-circuit: return index for inner-most for-loop if not warp specialized
   // with register sharing
-  bool is_warp_specialized = std::holds_alternative<WarpSpecialized>(
-      circular_buffer_tv->circularBufferOptions().type);
+  int64_t inner_loop_index =
+      getForLoopIndex(circular_buffer_tv, loops, /*is_inner_most_axis=*/true);
   if (!is_warp_specialized) {
     return loops[inner_loop_index]->indexOrStartIfTrivial();
   }
-
   // The inner-most and outer-most for loops can be different.
   // Get outer-most for-loop index.
   int64_t outer_loop_index =
       getForLoopIndex(circular_buffer_tv, loops, /*is_inner_most_axis=*/false);
-
   // Calculate insertion position.
-  int64_t insertion_position = inner_loop_index - outer_loop_index + 1;
+  auto warp_specialized = std::get<WarpSpecialized>(circular_buffer_type);
+  int64_t insertion_position = warp_specialized.stage_slice_position.has_value()
+      ? warp_specialized.stage_slice_position.value() - 1
+      : inner_loop_index - outer_loop_index + 1;
   return getLinearIndexRelativeForLoopStack(
       loops, insertion_position, /*start=*/outer_loop_index);
 }
@@ -662,7 +667,16 @@ Val* CircularBufferInfo::getLinearIndexRelativeForLoopStack(
   // the first for-loop.
   int64_t end_loop_index = insertion_position - 1 + start_loop_index;
 
-  NVF_ERROR(end_loop_index < (int64_t)loops.size());
+  NVF_ERROR(
+      end_loop_index < (int64_t)loops.size(),
+      "Loop index out of bound, insertion_position= ",
+      insertion_position,
+      ", start_loop_index= ",
+      start_loop_index,
+      ", end_loop_index= ",
+      end_loop_index,
+      ", loops.size()= ",
+      loops.size());
   NVF_ERROR(start_loop_index <= end_loop_index);
 
   Val* index = GpuLower::current()->kernel()->zeroVal();

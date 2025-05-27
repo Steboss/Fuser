@@ -800,9 +800,17 @@ AllocPosInfo getAllocPosInfo(
   auto gpu_lower = GpuLower::current();
 
   bool outer_alloc_found = false;
-
+  int64_t compute_pos = tv->getComputeAtPosition();
+  if (tv->isCircularBuffered() &&
+      gpu_lower->circularBufferInfo().hasWarpSpecialized()) {
+    const auto& warp_specialized = std::get<WarpSpecialized>(
+        tv->circularBufferOptions().type);
+    if (warp_specialized.stage_slice_position.has_value()) {
+      compute_pos = warp_specialized.stage_slice_position.value();
+    }
+  }
   for (auto fl : for_loops) {
-    if (info.alloc_pos == tv->getComputeAtPosition()) {
+    if (info.alloc_pos == compute_pos) {
       DEBUG_LOG("Break at info.alloc_pos = ", info.alloc_pos);
       break;
     }
@@ -865,7 +873,8 @@ AllocPosInfo getAllocPosInfo(
       info.alloc_for_loop = fl;
     }
   }
-
+  std::cout << "Alloc pos info for " << tv->toString() << ": "
+            << "alloc_pos = " << info.alloc_pos << " compute_pos = " << compute_pos << std::endl;
   return info;
 }
 
