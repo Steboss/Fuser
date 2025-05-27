@@ -55,7 +55,7 @@ void getHeuristics(
       [&](int64_t iter_unroll, int64_t n_stages, int64_t bdimx, int64_t bdimy) {
         // non-circular buffered and circular buffered smem size
         int64_t buffer_size = non_circular_buffered_smem_size +
-            circular_buffered_smem_size * iter_unroll * n_stages;
+            circular_buffered_smem_size * iter_unroll * n_stages * bdimy;
         // mbarrier size
         int64_t mbarrier_size = 16 * n_stages;
         // reduction workspace size, need to be aligned to 128 bytes since
@@ -129,6 +129,13 @@ void getHeuristics(
   while (1) {
     bool is_updated = false;
 
+    // increase circular buffer stages
+    if (n_stages == 1 &&
+        is_enough_smem(iter_unroll, n_stages * 2, bdimx, bdimy)) {
+      is_updated = true;
+      n_stages *= 2;
+    }
+
     // increase iter_unroll
     // (1) divisible by outer_dim_numel due to limitation of 1D TMA predicate.
     // (2) iter_unroll * dtype_size <= 16 bytes, to use vectorized smem access
@@ -137,13 +144,6 @@ void getHeuristics(
         iter_unroll * 2 <= 16 / (int64_t)computation_dtype_size) {
       is_updated = true;
       iter_unroll *= 2;
-    }
-
-    // increase circular buffer stages
-    if (n_stages == 1 &&
-        is_enough_smem(iter_unroll, n_stages * 2, bdimx, bdimy)) {
-      is_updated = true;
-      n_stages *= 2;
     }
 
     // increase bdimy when bdimx is not increased since multiple independent
