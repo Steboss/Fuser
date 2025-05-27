@@ -21,7 +21,7 @@ void getHeuristics(
     const int64_t regs_buffer_size,
     const int64_t circular_buffered_smem_size,
     const int64_t non_circular_buffered_smem_size,
-    const size_t tmp_gmem_dtype_size,
+    const size_t computation_dtype_size,
     const size_t vectorize_factor,
     const int64_t hp_threads_per_block_min,
     const int64_t hp_threads_per_block_max,
@@ -62,7 +62,7 @@ void getHeuristics(
         // other smems are stacked on top of it directly, see
         // assignNextAddress in StackBasedSharedMemAllocator
         int64_t reduction_workspace_size = roundUpToMultiple(
-            iter_unroll * bdimx * bdimy * tmp_gmem_dtype_size, 128);
+            iter_unroll * bdimx * bdimy * computation_dtype_size, 128);
         return (int64_t)dev_prop->sharedMemPerBlockOptin >=
             buffer_size + mbarrier_size + reduction_workspace_size;
       };
@@ -130,10 +130,11 @@ void getHeuristics(
     bool is_updated = false;
 
     // increase iter_unroll
-    // iter_unroll should be divisible by outer_dim_numel due to limitation of
-    // 1D TMA predicate.
+    // (1) divisible by outer_dim_numel due to limitation of 1D TMA predicate.
+    // (2) iter_unroll * dtype_size <= 16 bytes, to use vectorized smem access
     if (is_enough_smem(iter_unroll * 2, n_stages, bdimx, bdimy) &&
-        outer_dim_numel % (iter_unroll * 2) == 0) {
+        outer_dim_numel % (iter_unroll * 2) == 0 &&
+        iter_unroll * 2 <= 16 / (int64_t)computation_dtype_size) {
       is_updated = true;
       iter_unroll *= 2;
     }
@@ -147,7 +148,7 @@ void getHeuristics(
 
     // increase bdimy when bdimx is not increased since multiple independent
     // computation groups only supports bdimx == 128
-    if (bdimy == 10 && bdimx == 128 &&
+    if (bdimy == 1 && bdimx == 128 &&
         is_enough_smem(iter_unroll, n_stages, bdimx, bdimy * 2)) {
       is_updated = true;
       bdimy *= 2;
@@ -177,7 +178,8 @@ void getHeuristics(
   //                         number of reductions per thread.
   constexpr int64_t max_gmem_vect_access_bytes = 16;
   const int64_t max_tmp_gmem_vect_factor = std::min(
-      max_gmem_vect_access_bytes / (int64_t)tmp_gmem_dtype_size, vect_factor);
+      max_gmem_vect_access_bytes / (int64_t)computation_dtype_size,
+      vect_factor);
   int64_t tmp_gmem_write_vect = max_tmp_gmem_vect_factor;
   const int64_t workload_per_thread = inner_dim_numel >= 4096 ? 4l : 2l;
   int64_t vectorization_factor_outer =
@@ -750,7 +752,6 @@ void scheduleFusion(Fusion* fusion, const ReductionParams* rparams) {
         // }
       }
     }
-    fusion->printMath();
 
     std::unordered_set<TensorView*> exclude_tvs;
     for (auto [k, v] : tv_inline_pos_map) {
