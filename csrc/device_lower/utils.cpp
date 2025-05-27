@@ -801,16 +801,8 @@ AllocPosInfo getAllocPosInfo(
 
   bool outer_alloc_found = false;
 
-  // The actual compute at position is moved one step further to separate
-  // loading for different compute warp groups.
-  int64_t stop_pos = tv->getComputeAtPosition();
-  if (gpu_lower->circularBufferInfo().hasIndependentComputeWarpGroups() &&
-      tv->isCircularBuffered()) {
-    stop_pos += 1;
-  }
-
   for (auto fl : for_loops) {
-    if (info.alloc_pos == stop_pos) {
+    if (info.alloc_pos == tv->getComputeAtPosition()) {
       DEBUG_LOG("Break at info.alloc_pos = ", info.alloc_pos);
       break;
     }
